@@ -17,6 +17,7 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 import json
+import os
 import typing
 
 import bittensor as bt
@@ -24,6 +25,7 @@ import numpy as np
 
 from template.openfly_policy_io import canonicalize_exit_action_id
 from template.protocol import ALLOWED_ACTION_IDS
+from template.scorer import call_scorer_api, scorer_mode
 
 
 def _expected_action_heuristic(instruction: str) -> int:
@@ -59,6 +61,7 @@ def _score_single_response(
         "action_id": None,
         "confidence": None,
         "score_raw": 0.0,
+        "scorer_mode": scorer_mode(),
     }
     if response is None:
         detail["error"] = "none_response"
@@ -96,6 +99,30 @@ def _score_single_response(
     except (TypeError, ValueError):
         conf = 0.0
     detail["confidence"] = conf
+
+    mode = detail["scorer_mode"]
+    if mode == "api":
+        try:
+            data = call_scorer_api(
+                {
+                    "kind": "drone_navigation",
+                    "instruction": instruction,
+                    "action_id": aid,
+                    "confidence": conf,
+                    "expected_action_id_heuristic": expected_action,
+                    "miner_response": obj,
+                },
+                timeout=float(os.getenv("SCORER_TIMEOUT_SECONDS", "30")),
+            )
+            score = float(data["score"])
+            detail["score_raw"] = round(score, 4)
+            detail["scorer_api"] = True
+            return score, detail
+        except Exception as exc:  # noqa: BLE001
+            detail["error"] = f"scorer_api_failed:{exc}"
+            return 0.0, detail
+
+    # SCORER_MODE=hash: keyword heuristic match (local beta proxy).
     score = 0.10  # minimal reward for parseable output
     if aid in ALLOWED_ACTION_IDS:
         score += 0.20
@@ -116,11 +143,8 @@ def get_rewards(
     """
     Validator-side verification of mined instruction responses.
 
-    Scores are based on:
-    - parseability and schema validity
-    - action id validity
-    - heuristic match against synthetic instruction intent
-    - miner confidence
+    SCORER_MODE=hash (default): heuristic keyword match + confidence.
+    SCORER_MODE=api: POST each response to SCORER_API and use returned `score`.
     """
     raw_scores: list[float] = []
     details: list[dict[str, typing.Any]] = []
