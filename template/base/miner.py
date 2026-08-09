@@ -99,6 +99,7 @@ class BaseMinerNeuron(BaseNeuron):
 
         # Check that miner is registered on the network.
         self.sync()
+        last_sync_block = self.block
 
         # Serve passes the axon information to the network + netuid we are hosting on.
         # This will auto-update if the axon port of external ip have changed.
@@ -116,7 +117,7 @@ class BaseMinerNeuron(BaseNeuron):
         try:
             while not self.should_exit:
                 while (
-                    self.block - self.metagraph.last_update[self.uid]
+                    self.block - last_sync_block
                     < self.config.neuron.epoch_length
                 ):
                     # Wait before checking again.
@@ -126,8 +127,12 @@ class BaseMinerNeuron(BaseNeuron):
                     if self.should_exit:
                         break
 
+                if self.should_exit:
+                    break
+
                 # Sync metagraph and potentially set weights.
                 self.sync()
+                last_sync_block = self.block
                 self.step += 1
 
         # If someone intentionally stops the miner, it'll safely terminate operations.
