@@ -1,9 +1,28 @@
 #!/usr/bin/env python3
 """
 HTTP wrapper around run_drone_probe: POST /v1/drone-probe, GET /health.
-Run from /app root:
 
-  PROBE_PORT=8091 NETUID=2 WALLET_NAME=validator python scripts/subnet_probe_http.py
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+WARNING — LOCAL SMOKE-TEST ONLY. NOT A PRODUCTION SERVICE.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+This process is an internal localnet / developer smoke helper. It was never
+intended to be exposed on the public internet or to run as a long-lived prod
+API. It loads a local Bittensor wallet and signs dendrite traffic.
+
+Hardening (do not weaken without a security review):
+  - Listens on 127.0.0.1 by default (override only via PROBE_BIND).
+  - wallet_name / hotkey / chain_endpoint come ONLY from environment variables;
+    JSON body cannot choose which key material or chain endpoint to use.
+  - If PROBE_AUTH_TOKEN is set, POST requires Authorization: Bearer <token>.
+
+Do not publish this port in Docker as 0.0.0.0:… — use 127.0.0.1:hostPort:… if
+you must map it at all.
+
+Run from /app root (example):
+
+  PROBE_PORT=8091 NETUID=2 WALLET_NAME=validator \\
+    PROBE_AUTH_TOKEN=dev-only python scripts/subnet_probe_http.py
 """
 
 from __future__ import annotations
@@ -11,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import secrets
 import sys
 import traceback
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -22,6 +42,9 @@ sys.path.insert(0, str(_ROOT))
 sys.path.insert(0, str(_SCRIPTS))
 
 from subnet_probe_lib import run_drone_probe  # noqa: E402
+
+# Client JSON must never supply these — they select key material / chain target.
+_ENV_ONLY_KEYS = frozenset({"wallet_name", "hotkey", "chain_endpoint"})
 
 
 def _env_int(name: str, default: int) -> int:
@@ -57,14 +80,20 @@ DEFAULTS = {
 
 
 def _merge_body(body: dict | None) -> dict:
+    """Build probe kwargs. wallet / hotkey / chain_endpoint are env-only."""
     b = dict(body) if isinstance(body, dict) else {}
+    rejected = sorted(k for k in _ENV_ONLY_KEYS if k in b)
+    if rejected:
+        raise ValueError(
+            "refusing client-supplied "
+            + ", ".join(rejected)
+            + " — set WALLET_NAME / HOTKEY / SUBTENSOR_CHAIN in the environment only"
+        )
     out = {}
     out["netuid"] = int(b.get("netuid", DEFAULTS["netuid"]()))
-    out["wallet_name"] = str(b.get("wallet_name", DEFAULTS["wallet_name"]()))
-    out["hotkey"] = str(b.get("hotkey", DEFAULTS["hotkey"]()))
-    out["chain_endpoint"] = str(
-        b.get("chain_endpoint", DEFAULTS["chain_endpoint"]()),
-    )
+    out["wallet_name"] = str(DEFAULTS["wallet_name"]())
+    out["hotkey"] = str(DEFAULTS["hotkey"]())
+    out["chain_endpoint"] = str(DEFAULTS["chain_endpoint"]())
     out["sample_size"] = int(b.get("sample_size", DEFAULTS["sample_size"]()))
     out["instruction"] = str(b.get("instruction", DEFAULTS["instruction"]()))
     out["task_id"] = str(b.get("task_id", DEFAULTS["task_id"]()))
@@ -76,9 +105,29 @@ def _merge_body(body: dict | None) -> dict:
     return out
 
 
+def _auth_token() -> str:
+    return (os.environ.get("PROBE_AUTH_TOKEN") or "").strip()
+
+
+def _bearer_ok(header_val: str | None) -> bool:
+    expected = _auth_token()
+    if not expected:
+        return True
+    if header_val is None:
+        return False
+    h = header_val.strip()
+    if not h.lower().startswith("bearer "):
+        return False
+    supplied = h[7:].strip()
+    return bool(supplied) and secrets.compare_digest(supplied, expected)
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args) -> None:
-        sys.stderr.write("%s - - [%s] %s\n" % (self.client_address[0], self.log_date_time_string(), fmt % args))
+        sys.stderr.write(
+            "%s - - [%s] %s\n"
+            % (self.client_address[0], self.log_date_time_string(), fmt % args)
+        )
 
     def _send_json(self, status: int, obj: object) -> None:
         try:
@@ -108,6 +157,11 @@ class Handler(BaseHTTPRequestHandler):
                 {
                     "ok": True,
                     "service": "subnet-drone-probe",
+                    "warning": (
+                        "local smoke-test only; not a production API; "
+                        "binds loopback by default"
+                    ),
+                    "auth_required_for_post": bool(_auth_token()),
                     "routes": ["GET /health", "POST /v1/drone-probe"],
                 },
             )
@@ -118,6 +172,15 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0].rstrip("/") or "/"
         if path != "/v1/drone-probe":
             self.send_error(404)
+            return
+        if not _bearer_ok(self.headers.get("Authorization")):
+            self._send_json(
+                401,
+                {
+                    "ok": False,
+                    "error": "Unauthorized — set Authorization: Bearer <PROBE_AUTH_TOKEN>",
+                },
+            )
             return
         try:
             length = int(self.headers.get("Content-Length", "0") or "0")
@@ -134,7 +197,11 @@ class Handler(BaseHTTPRequestHandler):
                     {"ok": False, "error": "JSON body must be an object"},
                 )
                 return
-            kw = _merge_body(body)
+            try:
+                kw = _merge_body(body)
+            except ValueError as e:
+                self._send_json(400, {"ok": False, "error": str(e)})
+                return
             try:
                 result = asyncio.run(run_drone_probe(**kw))
             except Exception as e:
@@ -163,8 +230,35 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     port = _env_int("PROBE_PORT", 8091)
-    server = HTTPServer(("0.0.0.0", port), Handler)
-    print(f"subnet-drone-probe listening on 0.0.0.0:{port}", flush=True)
+    # Default loopback — never bind all interfaces unless explicitly overridden.
+    bind = (os.environ.get("PROBE_BIND") or "127.0.0.1").strip() or "127.0.0.1"
+    if bind in ("0.0.0.0", "::", "[::]"):
+        print(
+            "FATAL: refusing to bind PROBE_BIND="
+            + bind
+            + " (all interfaces). This smoke-test must stay on loopback. "
+            "Unset PROBE_BIND or set PROBE_BIND=127.0.0.1.",
+            file=sys.stderr,
+            flush=True,
+        )
+        raise SystemExit(2)
+
+    print(
+        "WARNING: subnet_probe_http is a LOCAL SMOKE-TEST only — "
+        "not for production / public exposure.",
+        file=sys.stderr,
+        flush=True,
+    )
+    if not _auth_token():
+        print(
+            "WARNING: PROBE_AUTH_TOKEN is unset — POST /v1/drone-probe has no auth. "
+            "Set PROBE_AUTH_TOKEN for any shared or long-lived use.",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    server = HTTPServer((bind, port), Handler)
+    print(f"subnet-drone-probe listening on {bind}:{port}", flush=True)
     server.serve_forever()
 
 

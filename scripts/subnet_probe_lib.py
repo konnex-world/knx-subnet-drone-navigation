@@ -1,5 +1,13 @@
 """
 One dendrite pass with DroneNavSynapse over several UIDs + validator verification.
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+WARNING — used by scripts/subnet_probe_http.py (LOCAL SMOKE-TEST ONLY).
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+run_drone_probe() loads a real local wallet and signs dendrite requests. Callers
+must pass wallet_name / hotkey / chain_endpoint from trusted configuration
+(environment), never from untrusted HTTP JSON. See subnet_probe_http.py.
 """
 
 from __future__ import annotations

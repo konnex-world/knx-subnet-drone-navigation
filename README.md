@@ -8,6 +8,20 @@ Konnex drone-navigation runtime package with:
 
 **Default:** root **`docker-compose.yml`** includes validator + miner stacks so **`docker compose up -d --build`** starts everything in one project (no orphan containers). Split files **`docker-compose.validator.yml`** / **`docker-compose.miner.yml`** stay for partial runs.
 
+## WARNING: `scripts/subnet_probe_http.py` is a local smoke-test only
+
+**Do not run this as a production / internet-facing service.**
+
+`POST /v1/drone-probe` is an internal developer helper: one dendrite pass against localnet miners so you can smoke-test without a full validator loop. It loads a real wallet from disk and signs traffic.
+
+- **Not part of the default compose stack** in this repo (miner / validator / UE only).
+- When used in a localnet Docker setup elsewhere, the host port must be published as **`127.0.0.1:…` only** — never `0.0.0.0`.
+- The script binds **`127.0.0.1` by default** and **refuses** `PROBE_BIND=0.0.0.0`.
+- `wallet_name` / `hotkey` / `chain_endpoint` are taken **only from env** (`WALLET_NAME`, `HOTKEY`, `SUBTENSOR_CHAIN`); the JSON body cannot choose them.
+- Set **`PROBE_AUTH_TOKEN`** and send `Authorization: Bearer …` on POST for any shared machine.
+
+See the big warning banner at the top of `scripts/subnet_probe_http.py` and `scripts/subnet_probe_lib.py`.
+
 ## Environment (set this first)
 
 Create `.env` from the template (this file is **only for this repo**; it does not replace `.env` in the parent `drone-navigation` tree):
