@@ -16,7 +16,7 @@ Konnex drone-navigation runtime package with:
 
 - **Not part of the default compose stack** in this repo (miner / validator / UE only).
 - When used in a localnet Docker setup elsewhere, the host port must be published as **`127.0.0.1:…` only** — never `0.0.0.0`.
-- The script binds **`127.0.0.1` by default** and **refuses** `PROBE_BIND=0.0.0.0`.
+- The script binds **`127.0.0.1` by default** and **refuses** `0.0.0.0` / `::` unless `PROBE_ALLOW_ALL_INTERFACES=1` (needed inside Docker so port-publish works). Host publish must still be **`127.0.0.1:…` only**.
 - `wallet_name` / `hotkey` / `chain_endpoint` are taken **only from env** (`WALLET_NAME`, `HOTKEY`, `SUBTENSOR_CHAIN`); the JSON body cannot choose them.
 - Set **`PROBE_AUTH_TOKEN`** and send `Authorization: Bearer …` on POST for any shared machine.
 

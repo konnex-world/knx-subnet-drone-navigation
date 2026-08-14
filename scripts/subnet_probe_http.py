@@ -230,14 +230,24 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     port = _env_int("PROBE_PORT", 8091)
-    # Default loopback — never bind all interfaces unless explicitly overridden.
+    # Default loopback for bare-metal. In Docker set PROBE_BIND=0.0.0.0 and
+    # PROBE_ALLOW_ALL_INTERFACES=1, and publish the host port as 127.0.0.1:… only.
     bind = (os.environ.get("PROBE_BIND") or "127.0.0.1").strip() or "127.0.0.1"
-    if bind in ("0.0.0.0", "::", "[::]"):
+    allow_all = (os.environ.get("PROBE_ALLOW_ALL_INTERFACES") or "").strip() in (
+        "1",
+        "true",
+        "TRUE",
+        "yes",
+        "YES",
+    )
+    if bind in ("0.0.0.0", "::", "[::]") and not allow_all:
         print(
             "FATAL: refusing to bind PROBE_BIND="
             + bind
-            + " (all interfaces). This smoke-test must stay on loopback. "
-            "Unset PROBE_BIND or set PROBE_BIND=127.0.0.1.",
+            + " without PROBE_ALLOW_ALL_INTERFACES=1. "
+            "For bare metal use PROBE_BIND=127.0.0.1. "
+            "For Docker: PROBE_BIND=0.0.0.0 PROBE_ALLOW_ALL_INTERFACES=1 "
+            "and publish ports as 127.0.0.1:hostPort:containerPort only.",
             file=sys.stderr,
             flush=True,
         )
@@ -249,6 +259,14 @@ def main() -> None:
         file=sys.stderr,
         flush=True,
     )
+    if bind in ("0.0.0.0", "::", "[::]"):
+        print(
+            "WARNING: listening on all interfaces inside this process/network "
+            "namespace. Ensure the Docker host publish is 127.0.0.1:… "
+            "(never 0.0.0.0:… on the host).",
+            file=sys.stderr,
+            flush=True,
+        )
     if not _auth_token():
         print(
             "WARNING: PROBE_AUTH_TOKEN is unset — POST /v1/drone-probe has no auth. "
