@@ -33,7 +33,6 @@ def check_uid_availability(
             p = None
         if p is not None and p in validator_axon_ports:
             return False
-        return True
     if metagraph.validator_permit[uid]:
         if metagraph.S[uid] > vpermit_tao_limit:
             return False
