@@ -245,7 +245,9 @@ def add_validator_args(cls, parser):
         help=(
             "Comma-separated axon ports never treated as miners (Docker: validator 9101/9102). "
             "When non-empty, only serving UIDs whose axon port is not in this set are sampled. "
-            "Empty string restores classic vpermit_tao_limit-only filtering."
+            "This port filter is applied IN ADDITION to the vpermit_tao_limit stake filter, "
+            "which always applies; setting this to an empty string disables only the port "
+            "exclusion and leaves the stake filter active."
         ),
         default="9101,9102",
     )

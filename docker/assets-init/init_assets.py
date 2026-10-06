@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import ntpath
 import os
 import shutil
+import ssl
 import tarfile
 import tempfile
 import urllib.request
@@ -83,22 +85,159 @@ def _chown_tree(path: Path, uid: int, gid: int) -> None:
         _log(f"warn: chown {path}: {e}")
 
 
+# Upper bound on a downloaded UE asset archive. A CitySample-style content tree
+# is large but finite; capping the download prevents a malicious or hijacked
+# source from filling the host disk (unbounded `shutil.copyfileobj` was the
+# previous behaviour).
+_MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024 * 1024  # 64 GiB
+_DOWNLOAD_CHUNK_BYTES = 1024 * 1024
+
+
 def _download_file(url: str, dst: Path) -> None:
+    """Download `url` to `dst` with an explicit TLS context and a size cap.
+
+    SECURITY/HARDENING: the previous implementation passed no TLS context, used
+    no size limit, and copied the whole body in one call. It now:
+      * verifies TLS with the system CA bundle (never an unverified context),
+      * streams in chunks and aborts once `_MAX_DOWNLOAD_BYTES` is exceeded,
+      * only writes to `dst` once the download has been read into place.
+    """
     _log(f"download: {url}")
     req = urllib.request.Request(url, headers={"User-Agent": "xsubnet-assets-init/1.0"})
-    with urllib.request.urlopen(req, timeout=1800) as resp, open(dst, "wb") as out:
-        shutil.copyfileobj(resp, out)
+    # Explicitly request certificate and hostname verification. Relying on the
+    # default is fragile across Python patch versions; being explicit documents
+    # the intent and prevents a regression to an unverified context.
+    ssl_context = ssl.create_default_context()
+    tmp_dst = dst.with_suffix(dst.suffix + ".part")
+    total = 0
+    try:
+        with (
+            urllib.request.urlopen(req, timeout=1800, context=ssl_context) as resp,
+            open(tmp_dst, "wb") as out,
+        ):
+            content_length = resp.headers.get("Content-Length")
+            if content_length is not None:
+                try:
+                    declared = int(content_length)
+                except ValueError:
+                    declared = None
+                if declared is not None and declared > _MAX_DOWNLOAD_BYTES:
+                    raise RuntimeError(
+                        f"UE archive declares {declared} bytes, exceeding the "
+                        f"{_MAX_DOWNLOAD_BYTES} byte cap"
+                    )
+            while True:
+                chunk = resp.read(_DOWNLOAD_CHUNK_BYTES)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > _MAX_DOWNLOAD_BYTES:
+                    raise RuntimeError(
+                        f"UE archive exceeds the {_MAX_DOWNLOAD_BYTES} byte cap"
+                    )
+                out.write(chunk)
+        # Rename only after a complete, in-limit download, so a partial or
+        # oversized response never leaves a truncated file that later looks valid.
+        os.replace(tmp_dst, dst)
+    finally:
+        if tmp_dst.exists():
+            try:
+                tmp_dst.unlink()
+            except OSError:
+                pass
+
+
+def _is_within(base: Path, target: Path) -> bool:
+    """Return True if `target` resolves to a location inside `base`.
+
+    `base` must already be resolved. Both sides are fully resolved first so that
+    symlinks and `..` components cannot be used to escape the destination.
+    """
+    try:
+        target.relative_to(base)
+    except ValueError:
+        return False
+    return True
+
+
+def _safe_members_zip(zf: zipfile.ZipFile, root: Path) -> None:
+    """Raise if any zip member would be written outside `root`.
+
+    Guards against zip-slip ("../" traversal) and against absolute or drive-letter
+    member names. CPython's zipfile already strips ".." from the destination it
+    computes, so this is defence in depth rather than the sole control.
+    """
+    for info in zf.infolist():
+        name = info.filename
+        # Reject absolute paths and Windows drive-qualified names outright.
+        if name.startswith(("/", "\\")) or ntpath.isabs(name):
+            raise RuntimeError(f"unsafe zip member (absolute path): {name!r}")
+        if os.path.splitdrive(name)[0]:
+            raise RuntimeError(f"unsafe zip member (drive-qualified): {name!r}")
+        # Reject traversal that survives normalisation.
+        dest = (root / name).resolve()
+        if not _is_within(root, dest):
+            raise RuntimeError(f"unsafe zip member (path traversal): {name!r}")
+
+
+def _safe_members_tar(tf: tarfile.TarFile, root: Path) -> list[tarfile.TarInfo]:
+    """Return the tar members that are safe to extract into `root`.
+
+    Rejects absolute paths, ".." traversal, device/FIFO nodes, and symlink or
+    hardlink members. Links are rejected because a link inside the destination
+    can be used to make a subsequent member write outside `root` even when that
+    member's own name looks safe.
+
+    This is CVE-2007-4559 class behaviour: Python 3.12 added `tarfile`'s
+    `filter=` parameter, but on 3.11 and earlier `extractall()` writes members
+    verbatim and silently, which is the version this project targets.
+    """
+    safe: list[tarfile.TarInfo] = []
+    for member in tf.getmembers():
+        name = member.name
+        if name.startswith(("/", "\\")) or ntpath.isabs(name) or os.path.splitdrive(name)[0]:
+            raise RuntimeError(f"unsafe archive member (absolute path): {name!r}")
+        dest = (root / name).resolve()
+        if not _is_within(root, dest):
+            raise RuntimeError(f"unsafe archive member (path traversal): {name!r}")
+        if member.issym() or member.islnk():
+            raise RuntimeError(f"unsafe archive member (link): {name!r}")
+        if member.isdev() or member.isfifo():
+            raise RuntimeError(f"unsafe archive member (device/FIFO): {name!r}")
+        safe.append(member)
+    return safe
 
 
 def _extract_archive(archive: Path, out_dir: Path) -> None:
+    """Extract a UE asset archive into `out_dir`, rejecting unsafe members.
+
+    SECURITY: this function runs as root inside the assets-init container and its
+    output directory is bind-mounted from the host. Previously it called
+    `extractall()` with no member validation, so a malicious archive (or a
+    hijacked upstream dataset) could write arbitrary files anywhere the container
+    can reach -- including the host's ./OpenFly-Platform tree, which is later
+    executed. Every member is now validated before anything is written.
+    """
     name = archive.name.lower()
+    # Resolve the destination so containment checks compare real paths.
+    root = out_dir.resolve()
+    root.mkdir(parents=True, exist_ok=True)
+
     if name.endswith(".zip"):
         with zipfile.ZipFile(archive, "r") as zf:
+            _safe_members_zip(zf, root)
             zf.extractall(out_dir)
         return
     if name.endswith(".tar.gz") or name.endswith(".tgz") or name.endswith(".tar"):
         with tarfile.open(archive, "r:*") as tf:
-            tf.extractall(out_dir)
+            safe_members = _safe_members_tar(tf, root)
+            # Pass `filter="data"` as an additional layer where supported
+            # (CPython >= 3.12); the explicit validation above is authoritative
+            # and works on the 3.11 runtime this project targets.
+            try:
+                tf.extractall(out_dir, members=safe_members, filter="data")
+            except TypeError:
+                tf.extractall(out_dir, members=safe_members)
         return
     raise RuntimeError(f"unsupported UE archive type: {archive.name}")
 
