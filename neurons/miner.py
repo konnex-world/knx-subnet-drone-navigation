@@ -37,7 +37,7 @@ from template.openfly_policy_io import (
     normalize_user_instruction,
     structured_explain_discrete,
 )
-from template.protocol import ACTION_LABELS, ALLOWED_ACTION_IDS
+from template.protocol import ACTION_LABELS, ALLOWED_ACTION_IDS, expected_action_id
 
 
 def _env_int(name: str, default: int) -> int:
@@ -95,24 +95,16 @@ class Miner(BaseMinerNeuron):
         )
 
     def _expected_action_heuristic(self, instruction: str) -> int:
-        t = instruction.lower()
-        if "stop" in t or "hold" in t or "wait" in t:
-            return 0
-        if "left" in t and "strafe" not in t:
-            return 2
-        if "right" in t and "strafe" not in t:
-            return 3
-        if "strafe left" in t:
-            return 6
-        if "strafe right" in t:
-            return 7
-        if "up" in t or "ascend" in t:
-            return 4
-        if "down" in t or "descend" in t:
-            return 5
-        if "photo" in t or "snapshot" in t:
-            return 10
-        return 1
+        """Return the expected action id for an instruction.
+
+        Delegates to the shared implementation in template.protocol.
+
+        FLIGHT SAFETY: the previous local copy used bare substring matching, so
+        "Take a photo of the roundup ceremony." resolved to ascend because "up"
+        appears inside "roundup". The miner then trained toward the wrong flight
+        action and disagreed with the validator's ground truth.
+        """
+        return expected_action_id(instruction)
 
     def _rule_based_candidate(self, instruction: str, *, tag: str) -> dict[str, typing.Any]:
         ins = normalize_user_instruction(instruction)

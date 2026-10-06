@@ -23,9 +23,31 @@ def check_uid_availability(
     vpermit_tao_limit: int,
     validator_axon_ports: FrozenSet[int],
 ) -> bool:
-    """Serving axons only; optional exclusion of validator axon ports (Docker 9101/9102)."""
+    """Serving axons only, minus over-staked validator permits and validator ports.
+
+    SECURITY/INTEGRITY: the vpermit stake gate now always runs. Previously it
+    sat behind `if validator_axon_ports:` and returned early when that set was
+    non-empty, so under the shipped Docker default (`9101,9102`) the stake filter
+    was silently skipped and a validator-permit neuron holding far more than
+    `vpermit_tao_limit` TAO was treated as a sampleable miner. The port filter is
+    applied as an additional, independent exclusion rather than as a replacement.
+    """
     if not metagraph.axons[uid].is_serving:
         return False
+
+    # Stake gate applies unconditionally: a neuron holding a validator permit with
+    # more stake than the configured limit is excluded regardless of its port.
+    if metagraph.validator_permit[uid]:
+        try:
+            stake = int(metagraph.S[uid])
+        except (TypeError, ValueError):
+            # An unreadable stake is treated as unknown, so the neuron is kept
+            # rather than silently dropped for a non-policy reason.
+            stake = 0
+        if stake > vpermit_tao_limit:
+            return False
+
+    # Port exclusion is an ADDITIONAL filter, applied after the stake gate.
     if validator_axon_ports:
         try:
             p = int(metagraph.axons[uid].port)
@@ -33,10 +55,7 @@ def check_uid_availability(
             p = None
         if p is not None and p in validator_axon_ports:
             return False
-        return True
-    if metagraph.validator_permit[uid]:
-        if metagraph.S[uid] > vpermit_tao_limit:
-            return False
+
     return True
 
 

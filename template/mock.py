@@ -7,7 +7,7 @@ import bittensor as bt
 
 from typing import List
 
-from template.protocol import ALLOWED_ACTION_IDS, ACTION_LABELS
+from template.protocol import ALLOWED_ACTION_IDS, ACTION_LABELS, expected_action_id
 
 
 class MockWallet:
@@ -103,22 +103,12 @@ class MockDendrite(bt.Dendrite):
                 if process_time < timeout:
                     s.dendrite.process_time = str(time.time() - start_time)
                     # TODO (developer): replace with your own expected synapse data
-                    t = str(getattr(s, "instruction", "") or "").lower()
-                    aid = 1
-                    if "stop" in t:
-                        aid = 0
-                    elif "left" in t and "strafe" not in t:
-                        aid = 2
-                    elif "right" in t and "strafe" not in t:
-                        aid = 3
-                    elif "up" in t:
-                        aid = 4
-                    elif "down" in t:
-                        aid = 5
-                    elif "strafe left" in t:
-                        aid = 6
-                    elif "strafe right" in t:
-                        aid = 7
+                    # Use the shared heuristic so the mock produces the same
+                    # ground truth as the validator. The previous inline version
+                    # used bare substring matching and ordered "up" before
+                    # "photo", so "roundup" selected ascend and the mock trained
+                    # miners toward the wrong flight action.
+                    aid = expected_action_id(str(getattr(s, "instruction", "") or ""))
                     if aid not in ALLOWED_ACTION_IDS:
                         aid = 1
                     conf = max(0.0, min(1.0, 0.5 + random.uniform(-0.2, 0.2)))
